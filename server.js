@@ -4,6 +4,7 @@ const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const archiver = require('archiver');
 const multer = require('multer');
+const path = require('path');
 
 const app = express();
 const port = 3000;
@@ -17,7 +18,6 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 if (!process.env.GEMINI_API_KEY) {
-  console.error("🛑 ERREUR : Pas de clé API dans le .env");
   process.exit(1);
 }
 
@@ -27,28 +27,33 @@ function cleanAndParseJSON(text) {
   let clean = text.replace(/```json/g, '').replace(/```/g, '');
   const firstBrace = clean.indexOf('{');
   const lastBrace = clean.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1) throw new Error("JSON IA invalide.");
+  
+  if (firstBrace === -1 || lastBrace === -1) throw new Error("Format JSON invalide");
+  
   clean = clean.substring(firstBrace, lastBrace + 1);
+
   try {
     return JSON.parse(clean);
   } catch (e) {
-    try { return JSON.parse(clean.replace(/,\s*}/g, '}')); } catch (e2) { throw e; }
+    try {
+      const fixed = clean.replace(/,(\s*})/g, '$1');
+      return JSON.parse(fixed);
+    } catch (e2) {
+      throw new Error(e.message);
+    }
   }
 }
 
 app.post('/generate', upload.any(), async (req, res) => {
-  console.log("📩 Requête reçue !");
-
   let data;
   try {
     data = JSON.parse(req.body.portfolioData);
   } catch (e) {
-    return res.status(400).json({ error: "Données JSON corrompues." });
+    return res.status(400).json({ error: "Données invalides" });
   }
 
   const avatarFile = req.files.find(f => f.fieldname === 'avatar');
   const logoFile = req.files.find(f => f.fieldname === 'logoImage');
-  const resumeFile = req.files.find(f => f.fieldname === 'resume');
   
   let avatarPath = null;
   let logoPath = null;
@@ -72,11 +77,11 @@ app.post('/generate', upload.any(), async (req, res) => {
 
   while (attempt < MAX_RETRIES && !success) {
     attempt++;
-    console.log(`🤖 Génération IA - Tentative ${attempt}/${MAX_RETRIES}...`);
+    console.log(`Tentative ${attempt}/${MAX_RETRIES}...`);
 
     try {
       const model = genAI.getGenerativeModel({ 
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         generationConfig: { temperature: 0.85 }
       });
 
@@ -154,9 +159,11 @@ app.post('/generate', upload.any(), async (req, res) => {
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
-      const code = cleanAndParseJSON(response.text());
+      const text = response.text();
 
-      if (!code.html || !code.css) throw new Error("Code IA incomplet");
+      const code = cleanAndParseJSON(text);
+
+      if (!code.html || !code.css) throw new Error("Code incomplet");
 
       const archive = archiver('zip', { zlib: { level: 9 } });
       res.attachment('portfolio_pro.zip');
@@ -171,19 +178,24 @@ app.post('/generate', upload.any(), async (req, res) => {
 
       await archive.finalize();
       success = true;
-      console.log("✅ ZIP généré et envoyé !");
 
     } catch (error) {
-      console.error(`⚠️ Erreur tentative ${attempt} :`, error.message);
+      console.error(`Erreur ${attempt}:`, error.message);
       finalError = error;
     }
   }
 
   if (!success) {
-    res.status(500).json({ error: "Échec de génération.", details: finalError?.message });
+    res.status(500).json({ error: "Échec de génération", details: finalError?.message });
   }
 });
 
+app.use(express.static(path.join(__dirname, '../client/dist')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+});
+
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🟢 SERVEUR PRÊT sur http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
 });
